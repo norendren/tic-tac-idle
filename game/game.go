@@ -95,14 +95,9 @@ func (g *Game) face(size float64) *text.GoTextFace {
 	return &text.GoTextFace{Source: g.fontSrc, Size: size}
 }
 
-// func moreTicCost(level int) int { return 1 + level*3 }
-func moreTicCost(level int) int { return 0 }
-func moreTacCost(level int) int { return 0 }
-
-// func moreTacCost(level int) int { return 5 * (level + 1) }
-func moreToeCost(level int) int { return 0 }
-
-//func moreToeCost(level int) int { return 100 * (level + 1) }
+func moreTicCost(level int) int { return 1 + level*3 }
+func moreTacCost(level int) int { return 3 + level*5 }
+func moreToeCost(level int) int { return 50 * (level + 1) }
 
 func (g *Game) finishGame(i int, result WinResult) {
 	switch {
@@ -422,7 +417,7 @@ func (g *Game) drawMoreTicBtn(screen *ebiten.Image) {
 	if g.moreTicLevel == 0 {
 		drawTC(screen, "unlock auto-move", g.face(11), cx, cy+56, colorDim)
 	} else {
-		drawTC(screen, fmt.Sprintf("LVL %d · %d/sec", g.moreTicLevel, g.moreTicLevel), g.face(11), cx, cy+56, colorDim)
+		drawTC(screen, fmt.Sprintf("%d/sec", g.moreTicLevel), g.face(11), cx, cy+56, colorDim)
 	}
 }
 
