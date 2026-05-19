@@ -1,0 +1,29 @@
+Building a playable tic tac toe game
+
+Some sort of fun quirk either for technical demonstration or fun/wow factor
+
+As quickly playable as possible.
+
+Written in Go. Ebiten game engine
+
+"Playable" here means in-browser. Host it on my personal website. Fallback to itch.io
+
+
+# What's the game look like?
+
+Idler style tic-tac-toe. Moves are made randomly and by clicking/spacebar/etc. X wins, O wins and Draws are tracked. Raw number of games will be the currency for upgrades.
+
+"more tic" -> you pay a number of games and moves are made automatically at 1/second, 2/second, 3/second
+
+"more tac" -> Duplicates the board, clicks still randomly make 1 move on one board, but "more tic" makes moves across all boards
+
+"more toe" -> cosmetic only, expensive and does something silly on the screen. Buy it 3-5 times and game is over.
+
+
+# Infrastructure and deployment
+
+- Using ebiten v2, focus on usage of non-deprecated functions and methods
+- Use nice colors or fonts, but only whatever we can find packaged with ebiten. Not worth much effort here
+- Deploy with github actions and github pages. 
+- Use subdomain of personal website, set up quickly to allow DNS time
+- Final README conclusion on process and reflections
