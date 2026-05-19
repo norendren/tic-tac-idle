@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"log"
+	"math"
 	"math/rand"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -26,6 +27,7 @@ const (
 
 	animFrames = 48  // ~0.8s at 60fps
 	resultTTL  = 120 // frames to show result label in status bar
+	moreToeMax = 3   // buying all three ends the game
 
 	btnW      = 170
 	btnH      = 76
@@ -69,7 +71,10 @@ type Game struct {
 	currency     int
 	moreTicLevel int // auto-move rate: moreTicLevel moves/sec across all boards
 	moreTacLevel int // number of extra boards purchased
+	moreToeLevel int // cosmetic stars; reaching moreToeMax ends the game
 	idleAccum    int // accumulator for fractional/multi moves per frame
+	tickCount    int // monotonically increasing, drives animations
+	gameOver     bool
 	recentResult WinResult
 	recentTimer  int
 	fontSrc      *text.GoTextFaceSource
@@ -94,7 +99,10 @@ func (g *Game) face(size float64) *text.GoTextFace {
 func moreTicCost(level int) int { return 0 }
 func moreTacCost(level int) int { return 0 }
 
-//func moreTacCost(level int) int { return 5 * (level + 1) }
+// func moreTacCost(level int) int { return 5 * (level + 1) }
+func moreToeCost(level int) int { return 0 }
+
+//func moreToeCost(level int) int { return 100 * (level + 1) }
 
 func (g *Game) finishGame(i int, result WinResult) {
 	switch {
@@ -138,12 +146,46 @@ func (g *Game) tryBuyUpgrade(mx, my int) bool {
 		}
 		return true
 	case mx >= bx2 && mx < bx2+btnW:
-		return true // more toe placeholder
+		if g.moreToeLevel < moreToeMax {
+			cost := moreToeCost(g.moreToeLevel)
+			if g.currency >= cost {
+				g.currency -= cost
+				g.moreToeLevel++
+				if g.moreToeLevel >= moreToeMax {
+					g.gameOver = true
+				}
+			}
+		}
+		return true
 	}
 	return false
 }
 
+func (g *Game) reset() {
+	g.slots = []boardSlot{{board: NewBoard()}}
+	g.scores = scores{}
+	g.currency = 0
+	g.moreTicLevel = 0
+	g.moreTacLevel = 0
+	g.moreToeLevel = 0
+	g.idleAccum = 0
+	g.recentResult = WinResult{}
+	g.recentTimer = 0
+	g.gameOver = false
+}
+
 func (g *Game) Update() error {
+	g.tickCount++
+
+	if g.gameOver {
+		if inpututil.IsKeyJustPressed(ebiten.KeySpace) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
+			inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			g.reset()
+		}
+		return nil
+	}
+
 	mouseClicked := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
 	if mouseClicked {
 		mx, my := ebiten.CursorPosition()
@@ -218,6 +260,12 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawBoards(screen)
 	g.drawStatus(screen)
 	g.drawUpgrades(screen)
+	if g.moreToeLevel > 0 {
+		g.drawStars(screen)
+	}
+	if g.gameOver {
+		g.drawGameOver(screen)
+	}
 }
 
 func (g *Game) drawHeader(screen *ebiten.Image) {
@@ -325,7 +373,7 @@ func (g *Game) drawSingleBoard(screen *ebiten.Image, slot *boardSlot, bx, by, sz
 
 func (g *Game) drawStatus(screen *ebiten.Image) {
 	const resultY = 572.0
-	const hintY = 602.0
+	const hintY = 585.0
 
 	if g.recentTimer > 0 {
 		var msg string
@@ -350,7 +398,7 @@ func (g *Game) drawUpgrades(screen *ebiten.Image) {
 	drawTC(screen, "UPGRADES", g.face(13), screenW/2, float64(upgradeY)-14, colorDim)
 	g.drawMoreTicBtn(screen)
 	g.drawMoreTacBtn(screen)
-	g.drawLockedBtn(screen, btnStartX+2*(btnW+btnGap), "MORE TOE")
+	g.drawMoreToeBtn(screen)
 }
 
 func (g *Game) drawMoreTicBtn(screen *ebiten.Image) {
@@ -400,15 +448,72 @@ func (g *Game) drawMoreTacBtn(screen *ebiten.Image) {
 	drawTC(screen, fmt.Sprintf("+1 board (%d total)", len(g.slots)+1), g.face(11), cx, cy+56, colorDim)
 }
 
-func (g *Game) drawLockedBtn(screen *ebiten.Image, bx int, label string) {
+func (g *Game) drawMoreToeBtn(screen *ebiten.Image) {
+	bx := btnStartX + 2*(btnW+btnGap)
 	x, y := float32(bx), float32(upgradeY)
 	cx, cy := float64(bx+btnW/2), float64(upgradeY)
 
-	vector.DrawFilledRect(screen, x, y, float32(btnW), float32(btnH), colorBtnBg, false)
-	vector.StrokeRect(screen, x, y, float32(btnW), float32(btnH), 1.5, colorBtnBorder, false)
+	maxed := g.moreToeLevel >= moreToeMax
+	cost := moreToeCost(g.moreToeLevel)
+	canAfford := !maxed && g.currency >= cost
 
-	drawTC(screen, label, g.face(14), cx, cy+28, colorDim)
-	drawTC(screen, "LOCKED", g.face(11), cx, cy+50, color.RGBA{70, 70, 100, 255})
+	var bgClr, borderClr color.Color
+	if maxed {
+		bgClr = color.RGBA{35, 15, 45, 255}
+		borderClr = color.RGBA{180, 60, 200, 255}
+	} else {
+		bgClr, borderClr = upgradeColors(canAfford)
+	}
+	vector.DrawFilledRect(screen, x, y, float32(btnW), float32(btnH), bgClr, false)
+	vector.StrokeRect(screen, x, y, float32(btnW), float32(btnH), 1.5, borderClr, false)
+
+	titleClr := color.Color(colorWin)
+	if maxed {
+		titleClr = rainbow(math.Mod(float64(g.tickCount)/180.0, 1.0))
+	}
+	drawTC(screen, "MORE TOE", g.face(14), cx, cy+16, titleClr)
+
+	if maxed {
+		drawTC(screen, "THE END", g.face(11), cx, cy+38, color.RGBA{200, 80, 220, 255})
+	} else {
+		costClr := color.Color(colorDim)
+		if canAfford {
+			costClr = colorAfford
+		}
+		drawTC(screen, fmt.Sprintf("COST: %s", gamesLabel(cost)), g.face(11), cx, cy+36, costClr)
+		drawTC(screen, fmt.Sprintf("%d/%d stars", g.moreToeLevel, moreToeMax), g.face(22), cx, cy+56, colorDim)
+	}
+}
+
+func (g *Game) drawStars(screen *ebiten.Image) {
+	n := g.moreToeLevel
+	for i := 0; i < n; i++ {
+		phase := math.Mod(float64(g.tickCount)/180.0+float64(i)*0.33, 1.0)
+		clr := rainbow(phase)
+		cx := float32(screenW) * float32(i+1) / float32(n+1)
+		cy := float32(548)
+		r := float32(14 + 4*math.Sin(float64(g.tickCount)/25.0+float64(i)*2.1))
+		drawStar(screen, cx, cy, r, clr)
+	}
+}
+
+func (g *Game) drawGameOver(screen *ebiten.Image) {
+	vector.DrawFilledRect(screen, 0, 0, screenW, screenH, color.RGBA{0, 0, 10, 220}, false)
+
+	// Three large stars in a row
+	for i := 0; i < 3; i++ {
+		phase := math.Mod(float64(g.tickCount)/180.0+float64(i)*0.33, 1.0)
+		clr := rainbow(phase)
+		cx := float32(screenW) * float32(i+1) / 4.0
+		cy := float32(260)
+		r := float32(24 + 8*math.Sin(float64(g.tickCount)/20.0+float64(i)*2.1))
+		drawStar(screen, cx, cy, r, clr)
+	}
+
+	winClr := rainbow(math.Mod(float64(g.tickCount)/120.0, 1.0))
+	drawTC(screen, "YOU WIN!", g.face(64), screenW/2, 390, winClr)
+	drawTC(screen, "the stars aligned", g.face(18), screenW/2, 450, colorDim)
+	drawTC(screen, "click or press space to play again", g.face(13), screenW/2, 490, color.RGBA{80, 80, 120, 255})
 }
 
 func (g *Game) Layout(_, _ int) (int, int) { return screenW, screenH }
@@ -427,6 +532,44 @@ func gamesLabel(n int) string {
 		return "1 game"
 	}
 	return fmt.Sprintf("%d games", n)
+}
+
+// rainbow maps t ∈ [0,1) to a fully-saturated hue cycle.
+func rainbow(t float64) color.RGBA {
+	h := math.Mod(t*360, 360)
+	c := 1.0
+	x := c * (1 - math.Abs(math.Mod(h/60, 2)-1))
+	var r, g, b float64
+	switch {
+	case h < 60:
+		r, g, b = c, x, 0
+	case h < 120:
+		r, g, b = x, c, 0
+	case h < 180:
+		r, g, b = 0, c, x
+	case h < 240:
+		r, g, b = 0, x, c
+	case h < 300:
+		r, g, b = x, 0, c
+	default:
+		r, g, b = c, 0, x
+	}
+	return color.RGBA{uint8(r * 255), uint8(g * 255), uint8(b * 255), 255}
+}
+
+// drawStar draws an 8-spoke sparkle (4 long cardinal + 4 short diagonal arms).
+func drawStar(screen *ebiten.Image, cx, cy, r float32, clr color.RGBA) {
+	for i := 0; i < 8; i++ {
+		angle := float64(i)*math.Pi/4 - math.Pi/2
+		length := r
+		if i%2 == 1 {
+			length = r * 0.45
+		}
+		x1 := cx + float32(math.Cos(angle))*length
+		y1 := cy + float32(math.Sin(angle))*length
+		vector.StrokeLine(screen, cx, cy, x1, y1, 2, clr, false)
+	}
+	vector.DrawFilledCircle(screen, cx, cy, 3, clr, false)
 }
 
 func drawXPiece(screen *ebiten.Image, cx, cy, cs float32, clr color.Color) {
