@@ -29,13 +29,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libgl1-mesa-dev libxxf86vm-dev libasound2-dev
 
       - name: Vet
-        run: go vet ./...
+        run: go vet ./game/...
 
       - name: Test
-        run: go test ./...
+        run: go test ./game/...
 
       - name: Build WASM
-        run: GOOS=js GOARCH=wasm go build -o web/main.wasm .
+        run: GOOS=js GOARCH=wasm go build -o web/main.wasm ./game/
 
       - name: Copy wasm_exec.js
         run: cp $(go env GOROOT)/lib/wasm/wasm_exec.js web/
