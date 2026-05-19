@@ -31,5 +31,5 @@ For a time sensitive exercise like this, I just wanted to hit the ground running
 # Other Musings
 
 * I wanted to add a "score" functionality that would incorporate more systemic buildout. For example, your "score" would be the overall time spent to buy 3 stars.
-  * With this, I could use Cloudflare/R2 to host a static high score file and people could easily see/share their high scores. I'm unsure whether this is patently unrealistic for 90 mins or not...
+  * With this, I could use Cloudflare/R2 to host a static high score file and people could easily see/share their high scores. I'm unsure whether this is patently unrealistic for 90 mins or not. The important thing is that it would add additional layers to the implementation, for better or worse. Navigating the implementation and API calls to read and update a file for high score listing would be an interesting addition in the scope of time alotted 
 * Telemetry for the app would be an awesome addition, but would also require specific tooling. Instrumenting with OpenTelemetry would allow for metrics and traces on overall game performance and player decision-making if this were a "real game". How often upgrades are purchased, etc. Telemetry in anything one builds is just an important consideration
