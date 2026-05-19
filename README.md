@@ -26,6 +26,7 @@ For a time sensitive exercise like this, I just wanted to hit the ground running
   * Win detection, while file for tic-tac-toe, is O(N) as it iterates through the statically defined win states for every board. I researched the "magic square" algorithm but the implementation alone (without AI at least) would take a while to create from scratch
   * Similarly, though it could be my game programming naivete, the loops for drawing board states are a place I would spend time examining on whether previous board states could be re-used when drawing
   * As with any library churn and change, there are a few deprecated functions being used that wouldn't normally make it through PR review.
+  * Lastly, from manual testing the game performs fine, but there were no tests included in the final product here. Unit tests for simple game logic are fine to pass on, but i was hoping to get a benchmark test included to ensure that at certain game states the need for calculations didn't outstrip the calculation time for the game loop. You've got ~16ms to get a loop done (60 each second) and it would've been great to see if/where it breaks
 * Definitely overboard on the actual game design aspect. I'm proud of the full pipeline that was completed, but the game loop iterations took enough time that I felt rushed in the timebox
 
 # Other Musings
