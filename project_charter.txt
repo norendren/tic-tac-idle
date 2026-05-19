@@ -27,3 +27,9 @@ Idler style tic-tac-toe. Moves are made randomly and by clicking/spacebar/etc. X
 - Deploy with github actions and github pages. 
 - Use subdomain of personal website, set up quickly to allow DNS time
 - Final README conclusion on process and reflections
+
+# In progress notes and observations
+## Talking points
+Win detection O(N)
+Board painting O(N)
+Usage of deprecated functions and default to lower go version in CI/CD files

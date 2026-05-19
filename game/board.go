@@ -1,6 +1,10 @@
 package main
 
-import "math/rand"
+import (
+	"math/rand"
+
+	"github.com/hajimehoshi/ebiten/v2"
+)
 
 type Player int8
 
@@ -10,6 +14,8 @@ const (
 	PlayerO Player = 2
 )
 
+// Hardcoded win lines are reasonable for tic-tac-toe but O(N) for each board to detect
+// O(1) should be possible, would evaluate with time
 var winLines = [8][3]int{
 	{0, 1, 2}, {3, 4, 5}, {6, 7, 8},
 	{0, 3, 6}, {1, 4, 7}, {2, 5, 8},
@@ -47,6 +53,7 @@ func (b *Board) RandomMove() bool {
 }
 
 func (b *Board) CheckResult() (WinResult, bool) {
+	ebiten.ActualTPS()
 	for _, line := range winLines {
 		a, bb, c := line[0], line[1], line[2]
 		if b.cells[a] != Empty && b.cells[a] == b.cells[bb] && b.cells[a] == b.cells[c] {
