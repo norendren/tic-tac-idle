@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"log"
+	"math/rand"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -14,13 +15,17 @@ import (
 )
 
 const (
-	screenW    = 600
-	screenH    = 720
-	boardSize  = 360
-	cellSize   = boardSize / 3 // 120
-	boardX     = (screenW - boardSize) / 2
-	boardY     = 170
-	animFrames = 48 // ~0.8s at 60fps
+	screenW = 600
+	screenH = 720
+
+	// Board area: fixed region boards render into, regardless of count.
+	boardAreaX = 10
+	boardAreaY = 162
+	boardAreaW = screenW - 2*boardAreaX // 580
+	boardAreaH = 368                    // 530 - boardAreaY
+
+	animFrames = 48  // ~0.8s at 60fps
+	resultTTL  = 120 // frames to show result label in status bar
 
 	btnW      = 170
 	btnH      = 76
@@ -39,15 +44,16 @@ var (
 	colorBtnBg     = color.RGBA{25, 25, 45, 255}
 	colorBtnBorder = color.RGBA{70, 70, 115, 255}
 	colorAfford    = color.RGBA{100, 220, 110, 255}
-	colorMaxed     = color.RGBA{160, 100, 240, 255}
 )
 
-type phase int
+// boardSlot holds the state for a single board instance.
+type boardSlot struct {
+	board     Board
+	animTimer int // >0 means showing result animation
+	result    WinResult
+}
 
-const (
-	phasePlaying phase = iota
-	phaseAnim
-)
+func (s *boardSlot) inAnim() bool { return s.animTimer > 0 }
 
 type scores struct {
 	xWins int
@@ -58,15 +64,15 @@ type scores struct {
 func (s scores) total() int { return s.xWins + s.oWins + s.draws }
 
 type Game struct {
-	board        Board
+	slots        []boardSlot
 	scores       scores
-	phase        phase
-	lastResult   WinResult
-	animTimer    int
-	fontSrc      *text.GoTextFaceSource
 	currency     int
-	moreTicLevel int
-	idleTimer    int
+	moreTicLevel int // auto-move rate: moreTicLevel moves/sec across all boards
+	moreTacLevel int // number of extra boards purchased
+	idleAccum    int // accumulator for fractional/multi moves per frame
+	recentResult WinResult
+	recentTimer  int
+	fontSrc      *text.GoTextFaceSource
 }
 
 func NewGame() *Game {
@@ -74,17 +80,23 @@ func NewGame() *Game {
 	if err != nil {
 		log.Fatal(err)
 	}
-	return &Game{board: NewBoard(), fontSrc: src}
+	return &Game{
+		slots:   []boardSlot{{board: NewBoard()}},
+		fontSrc: src,
+	}
 }
 
 func (g *Game) face(size float64) *text.GoTextFace {
 	return &text.GoTextFace{Source: g.fontSrc, Size: size}
 }
 
-// moreTicCost returns the cost for the next more-tic level (starts at 1, +3 per level).
-func moreTicCost(level int) int { return 1 + level*3 }
+// func moreTicCost(level int) int { return 1 + level*3 }
+func moreTicCost(level int) int { return 0 }
+func moreTacCost(level int) int { return 0 }
 
-func (g *Game) recordResult(result WinResult) {
+//func moreTacCost(level int) int { return 5 * (level + 1) }
+
+func (g *Game) finishGame(i int, result WinResult) {
 	switch {
 	case result.isDraw:
 		g.scores.draws++
@@ -94,13 +106,13 @@ func (g *Game) recordResult(result WinResult) {
 		g.scores.oWins++
 	}
 	g.currency++
-	g.lastResult = result
-	g.phase = phaseAnim
-	g.idleTimer = 0
+	g.recentResult = result
+	g.recentTimer = resultTTL
+	g.slots[i].result = result
+	g.slots[i].animTimer = 1
 }
 
-// tryBuyUpgrade checks if a mouse click landed on an upgrade button and handles it.
-// Returns true if the click was consumed by a button area.
+// tryBuyUpgrade returns true if the click was consumed by a button area.
 func (g *Game) tryBuyUpgrade(mx, my int) bool {
 	if my < upgradeY || my >= upgradeY+btnH {
 		return false
@@ -111,17 +123,20 @@ func (g *Game) tryBuyUpgrade(mx, my int) bool {
 
 	switch {
 	case mx >= bx0 && mx < bx0+btnW:
-		if g.moreTicLevel < 3 {
-			cost := moreTicCost(g.moreTicLevel)
-			if g.currency >= cost {
-				g.currency -= cost
-				g.moreTicLevel++
-				g.idleTimer = 0
-			}
+		cost := moreTicCost(g.moreTicLevel)
+		if g.currency >= cost {
+			g.currency -= cost
+			g.moreTicLevel++
 		}
 		return true
 	case mx >= bx1 && mx < bx1+btnW:
-		return true // more tac placeholder
+		cost := moreTacCost(g.moreTacLevel)
+		if g.currency >= cost {
+			g.currency -= cost
+			g.moreTacLevel++
+			g.slots = append(g.slots, boardSlot{board: NewBoard()})
+		}
+		return true
 	case mx >= bx2 && mx < bx2+btnW:
 		return true // more toe placeholder
 	}
@@ -141,44 +156,66 @@ func (g *Game) Update() error {
 		inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
 		mouseClicked
 
-	if g.phase == phaseAnim {
-		g.animTimer++
-		if g.animTimer >= animFrames || just {
-			g.board.Reset()
-			g.phase = phasePlaying
-			g.animTimer = 0
+	// Advance per-slot animation timers.
+	for i := range g.slots {
+		s := &g.slots[i]
+		if s.inAnim() {
+			s.animTimer++
+			if s.animTimer > animFrames {
+				s.board.Reset()
+				s.animTimer = 0
+			}
 		}
-		return nil
 	}
 
-	// Idle auto-moves at moreTicLevel moves/sec across all boards (currently one).
+	if g.recentTimer > 0 {
+		g.recentTimer--
+	}
+
+	// Idle auto-moves: accumulate moreTicLevel per frame, fire one move per 60 accumulated.
+	// This handles both sub-1/sec and multi-per-frame rates without a cap.
 	if g.moreTicLevel > 0 {
-		g.idleTimer++
-		if g.idleTimer >= 60/g.moreTicLevel {
-			g.idleTimer = 0
-			if g.board.RandomMove() {
-				if result, done := g.board.CheckResult(); done {
-					g.recordResult(result)
-					return nil
+		g.idleAccum += g.moreTicLevel
+		for g.idleAccum >= 60 {
+			g.idleAccum -= 60
+			for i := range g.slots {
+				if g.slots[i].inAnim() {
+					continue
+				}
+				if g.slots[i].board.RandomMove() {
+					if result, done := g.slots[i].board.CheckResult(); done {
+						g.finishGame(i, result)
+					}
 				}
 			}
 		}
 	}
 
+	// Manual move: one move on a random non-animating board.
 	if just {
-		if g.board.RandomMove() {
-			if result, done := g.board.CheckResult(); done {
-				g.recordResult(result)
+		available := make([]int, 0, len(g.slots))
+		for i := range g.slots {
+			if !g.slots[i].inAnim() {
+				available = append(available, i)
+			}
+		}
+		if len(available) > 0 {
+			i := available[rand.Intn(len(available))]
+			if g.slots[i].board.RandomMove() {
+				if result, done := g.slots[i].board.CheckResult(); done {
+					g.finishGame(i, result)
+				}
 			}
 		}
 	}
+
 	return nil
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(colorBg)
 	g.drawHeader(screen)
-	g.drawBoard(screen)
+	g.drawBoards(screen)
 	g.drawStatus(screen)
 	g.drawUpgrades(screen)
 }
@@ -194,121 +231,178 @@ func (g *Game) drawHeader(screen *ebiten.Image) {
 	drawTC(screen, fmt.Sprintf("%d  O", g.scores.oWins), g.face(17), 3*screenW/4, 148, colorO)
 }
 
-func (g *Game) drawBoard(screen *ebiten.Image) {
-	// TODO: cleanup deprecated function references
-	vector.DrawFilledRect(screen,
-		float32(boardX), float32(boardY), float32(boardSize), float32(boardSize),
+// boardLayout returns grid dims and per-board pixel size for n boards.
+func boardLayout(n int) (cols, rows, sz int) {
+	if n < 1 {
+		n = 1
+	}
+	cols = n
+	if cols > 5 {
+		cols = 5
+	}
+	rows = (n + cols - 1) / cols
+	cellW := boardAreaW / cols
+	cellH := boardAreaH / rows
+	sz = cellW - 8
+	if cellH-8 < sz {
+		sz = cellH - 8
+	}
+	if sz < 1 {
+		sz = 1
+	}
+	return
+}
+
+// boardOrigin returns the top-left pixel corner of board i.
+func boardOrigin(i, cols, cellW, cellH, sz int) (x, y int) {
+	row, col := i/cols, i%cols
+	cx := boardAreaX + col*cellW + cellW/2
+	cy := boardAreaY + row*cellH + cellH/2
+	return cx - sz/2, cy - sz/2
+}
+
+func (g *Game) drawBoards(screen *ebiten.Image) {
+	n := len(g.slots)
+	cols, rows, sz := boardLayout(n)
+	cellW := boardAreaW / cols
+	cellH := boardAreaH / rows
+	cs := float32(sz) / 3 // pixel size of one cell within a board
+
+	for i := range g.slots {
+		bx, by := boardOrigin(i, cols, cellW, cellH, sz)
+		g.drawSingleBoard(screen, &g.slots[i], bx, by, sz, cs)
+	}
+}
+
+func (g *Game) drawSingleBoard(screen *ebiten.Image, slot *boardSlot, bx, by, sz int, cs float32) {
+	lw := float32(1.5)
+	if sz >= 200 {
+		lw = 2
+	}
+
+	vector.DrawFilledRect(screen, float32(bx), float32(by), float32(sz), float32(sz),
 		color.RGBA{22, 22, 38, 255}, false)
 
-	lw := float32(2)
 	for i := 1; i < 3; i++ {
-		x := float32(boardX + i*cellSize)
-		vector.StrokeLine(screen, x, float32(boardY), x, float32(boardY+boardSize), lw, colorGrid, false)
-		y := float32(boardY + i*cellSize)
-		vector.StrokeLine(screen, float32(boardX), y, float32(boardX+boardSize), y, lw, colorGrid, false)
+		x := float32(bx + i*sz/3)
+		vector.StrokeLine(screen, x, float32(by), x, float32(by+sz), lw, colorGrid, false)
+		y := float32(by + i*sz/3)
+		vector.StrokeLine(screen, float32(bx), y, float32(bx+sz), y, lw, colorGrid, false)
 	}
-	vector.StrokeRect(screen,
-		float32(boardX), float32(boardY), float32(boardSize), float32(boardSize),
-		lw, colorGrid, false)
+	vector.StrokeRect(screen, float32(bx), float32(by), float32(sz), float32(sz), lw, colorGrid, false)
 
-	// Might be a gamedev thing but also feels like optimization problem
-	// Paint entire board state to then display at once but may be splitting hairs
-	for i, p := range g.board.cells {
-		row, col := i/3, i%3
-		cx := float32(boardX + col*cellSize + cellSize/2)
-		cy := float32(boardY + row*cellSize + cellSize/2)
+	for pi, p := range slot.board.cells {
+		row, col := pi/3, pi%3
+		cx := float32(bx) + float32(col)*cs + cs/2
+		cy := float32(by) + float32(row)*cs + cs/2
 		switch p {
 		case PlayerX:
-			drawXPiece(screen, cx, cy, colorX)
+			drawXPiece(screen, cx, cy, cs, colorX)
 		case PlayerO:
-			drawOPiece(screen, cx, cy, colorO)
+			drawOPiece(screen, cx, cy, cs, colorO)
 		}
 	}
 
-	// Solid win line during animation, in the winner's color
-	if g.phase == phaseAnim && !g.lastResult.isDraw {
-		line := g.lastResult.line
+	if slot.inAnim() && !slot.result.isDraw {
+		line := slot.result.line
 		r0, c0 := line[0]/3, line[0]%3
 		r2, c2 := line[2]/3, line[2]%3
-		x0 := float32(boardX + c0*cellSize + cellSize/2)
-		y0 := float32(boardY + r0*cellSize + cellSize/2)
-		x1 := float32(boardX + c2*cellSize + cellSize/2)
-		y1 := float32(boardY + r2*cellSize + cellSize/2)
+		x0 := float32(bx) + float32(c0)*cs + cs/2
+		y0 := float32(by) + float32(r0)*cs + cs/2
+		x1 := float32(bx) + float32(c2)*cs + cs/2
+		y1 := float32(by) + float32(r2)*cs + cs/2
 		winColor := colorX
-		if g.lastResult.winner == PlayerO {
+		if slot.result.winner == PlayerO {
 			winColor = colorO
 		}
-		vector.StrokeLine(screen, x0, y0, x1, y1, 8, winColor, true)
+		wlw := lw * 3
+		if wlw < 3 {
+			wlw = 3
+		}
+		vector.StrokeLine(screen, x0, y0, x1, y1, wlw, winColor, true)
 	}
 }
 
 func (g *Game) drawStatus(screen *ebiten.Image) {
-	resultY := float64(boardY+boardSize) + 42
-	hintY := float64(boardY+boardSize) + 72
+	const resultY = 572.0
+	const hintY = 602.0
 
-	if g.phase == phaseAnim {
+	if g.recentTimer > 0 {
 		var msg string
 		var clr color.Color
 		switch {
-		case g.lastResult.isDraw:
+		case g.recentResult.isDraw:
 			msg, clr = "DRAW", colorDim
-		case g.lastResult.winner == PlayerX:
+		case g.recentResult.winner == PlayerX:
 			msg, clr = "X WINS!", colorX
 		default:
 			msg, clr = "O WINS!", colorO
 		}
 		drawTC(screen, msg, g.face(32), screenW/2, resultY, clr)
-		drawTC(screen, "SPACE or CLICK for new game", g.face(14), screenW/2, hintY, colorDim)
-		return
 	}
-	drawTC(screen, "SPACE or CLICK to play", g.face(17), screenW/2, resultY+15, colorDim)
+
+	if g.moreTicLevel == 0 {
+		drawTC(screen, "SPACE or CLICK to play", g.face(14), screenW/2, hintY, colorDim)
+	}
 }
 
 func (g *Game) drawUpgrades(screen *ebiten.Image) {
 	drawTC(screen, "UPGRADES", g.face(13), screenW/2, float64(upgradeY)-14, colorDim)
 	g.drawMoreTicBtn(screen)
-	g.drawLockedBtn(screen, btnStartX+btnW+btnGap, "MORE TAC")
+	g.drawMoreTacBtn(screen)
 	g.drawLockedBtn(screen, btnStartX+2*(btnW+btnGap), "MORE TOE")
 }
 
 func (g *Game) drawMoreTicBtn(screen *ebiten.Image) {
 	x, y := float32(btnStartX), float32(upgradeY)
-	cx := float64(btnStartX + btnW/2)
-	cy := float64(upgradeY)
+	cx, cy := float64(btnStartX+btnW/2), float64(upgradeY)
 
-	canAfford := g.currency >= moreTicCost(g.moreTicLevel)
+	cost := moreTicCost(g.moreTicLevel)
+	canAfford := g.currency >= cost
 
-	bgClr := color.Color(colorBtnBg)
-	bgClr = color.RGBA{20, 40, 25, 255}
-	borderClr := color.Color(colorBtnBorder)
-	borderClr = colorAfford
-
+	bgClr, borderClr := upgradeColors(canAfford)
 	vector.DrawFilledRect(screen, x, y, float32(btnW), float32(btnH), bgClr, false)
 	vector.StrokeRect(screen, x, y, float32(btnW), float32(btnH), 1.5, borderClr, false)
 
 	drawTC(screen, "MORE TIC", g.face(14), cx, cy+16, colorWin)
 
-	cost := moreTicCost(g.moreTicLevel)
-	costLabel := fmt.Sprintf("COST: %d game", cost)
-	if cost != 1 {
-		costLabel += "s"
-	}
 	costClr := color.Color(colorDim)
 	if canAfford {
 		costClr = colorAfford
 	}
-	drawTC(screen, costLabel, g.face(11), cx, cy+36, costClr)
+	drawTC(screen, fmt.Sprintf("COST: %s", gamesLabel(cost)), g.face(11), cx, cy+36, costClr)
 	if g.moreTicLevel == 0 {
 		drawTC(screen, "unlock auto-move", g.face(11), cx, cy+56, colorDim)
 	} else {
-		drawTC(screen, fmt.Sprintf("LVL %d · %d move/sec", g.moreTicLevel, g.moreTicLevel), g.face(11), cx, cy+56, colorDim)
+		drawTC(screen, fmt.Sprintf("LVL %d · %d/sec", g.moreTicLevel, g.moreTicLevel), g.face(11), cx, cy+56, colorDim)
 	}
+}
+
+func (g *Game) drawMoreTacBtn(screen *ebiten.Image) {
+	bx := btnStartX + btnW + btnGap
+	x, y := float32(bx), float32(upgradeY)
+	cx, cy := float64(bx+btnW/2), float64(upgradeY)
+
+	cost := moreTacCost(g.moreTacLevel)
+	canAfford := g.currency >= cost
+
+	bgClr, borderClr := upgradeColors(canAfford)
+	vector.DrawFilledRect(screen, x, y, float32(btnW), float32(btnH), bgClr, false)
+	vector.StrokeRect(screen, x, y, float32(btnW), float32(btnH), 1.5, borderClr, false)
+
+	drawTC(screen, "MORE TAC", g.face(14), cx, cy+16, colorWin)
+
+	costClr := color.Color(colorDim)
+	if canAfford {
+		costClr = colorAfford
+	}
+	drawTC(screen, fmt.Sprintf("COST: %s", gamesLabel(cost)), g.face(11), cx, cy+36, costClr)
+	drawTC(screen, fmt.Sprintf("+1 board (%d total)", len(g.slots)+1), g.face(11), cx, cy+56, colorDim)
 }
 
 func (g *Game) drawLockedBtn(screen *ebiten.Image, bx int, label string) {
 	x, y := float32(bx), float32(upgradeY)
-	cx := float64(bx + btnW/2)
-	cy := float64(upgradeY)
+	cx, cy := float64(bx+btnW/2), float64(upgradeY)
 
 	vector.DrawFilledRect(screen, x, y, float32(btnW), float32(btnH), colorBtnBg, false)
 	vector.StrokeRect(screen, x, y, float32(btnW), float32(btnH), 1.5, colorBtnBorder, false)
@@ -319,15 +413,40 @@ func (g *Game) drawLockedBtn(screen *ebiten.Image, bx int, label string) {
 
 func (g *Game) Layout(_, _ int) (int, int) { return screenW, screenH }
 
-func drawXPiece(screen *ebiten.Image, cx, cy float32, clr color.Color) {
-	pad := float32(26)
-	half := float32(cellSize / 2)
-	vector.StrokeLine(screen, cx-half+pad, cy-half+pad, cx+half-pad, cy+half-pad, 6, clr, true)
-	vector.StrokeLine(screen, cx+half-pad, cy-half+pad, cx-half+pad, cy+half-pad, 6, clr, true)
+// upgradeColors returns bg and border colors based on affordability.
+func upgradeColors(canAfford bool) (color.Color, color.Color) {
+	if canAfford {
+		return color.RGBA{20, 40, 25, 255}, colorAfford
+	}
+	return colorBtnBg, colorBtnBorder
 }
 
-func drawOPiece(screen *ebiten.Image, cx, cy float32, clr color.Color) {
-	vector.StrokeCircle(screen, cx, cy, float32(cellSize/2)-24, 6, clr, true)
+// gamesLabel formats a game count with correct singular/plural.
+func gamesLabel(n int) string {
+	if n == 1 {
+		return "1 game"
+	}
+	return fmt.Sprintf("%d games", n)
+}
+
+func drawXPiece(screen *ebiten.Image, cx, cy, cs float32, clr color.Color) {
+	pad := cs * 0.28
+	half := cs / 2
+	lw := cs / 10
+	if lw < 2 {
+		lw = 2
+	}
+	vector.StrokeLine(screen, cx-half+pad, cy-half+pad, cx+half-pad, cy+half-pad, lw, clr, true)
+	vector.StrokeLine(screen, cx+half-pad, cy-half+pad, cx-half+pad, cy+half-pad, lw, clr, true)
+}
+
+func drawOPiece(screen *ebiten.Image, cx, cy, cs float32, clr color.Color) {
+	r := cs/2 - cs*0.15
+	lw := cs / 10
+	if lw < 2 {
+		lw = 2
+	}
+	vector.StrokeCircle(screen, cx, cy, r, lw, clr, true)
 }
 
 func drawTC(screen *ebiten.Image, str string, face *text.GoTextFace, x, y float64, clr color.Color) {
